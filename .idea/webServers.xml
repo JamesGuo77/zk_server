@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="08567ac7-fee1-435f-96a5-24a92ac55784" name="zk_server">
+        <fileTransfer rootFolder="/disk1/workspace/py39_tf270/zk_server" accessType="SFTP" host="172.24.60.106" port="22" sshConfigId="03e41f18-3bff-4fe2-9d1f-bd64c8ebac6e" sshConfig="root@172.24.60.106:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
