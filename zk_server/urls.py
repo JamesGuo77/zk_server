@@ -16,7 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
-from zk_server_qeeg import views, views11, viewsx
+from zk_server_qeeg import views, views11, viewsx, views12
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -28,5 +28,6 @@ urlpatterns = [
     # path('qteeg_history', views.qteeg_history),
     # path('qteeg_history1', viewsx.qteeg_history),
     path('qteeg_history2', views11.qteeg_history),
+    path('qteeg_history3', views12.qteeg_history),
     # path('qeeg_monitor', views.qeeg_monitor)
 ]

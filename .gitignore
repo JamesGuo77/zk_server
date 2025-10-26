@@ -1,0 +1,8 @@
+# Package Files
+*.jar
+*.zip
+*.tar.gz
+*.rar
+
+# .idea
+.idea
