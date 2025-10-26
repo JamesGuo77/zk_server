@@ -1083,6 +1083,35 @@ def sig_chns_split1(start_seconds, stop_seconds, epoch_length, raw, channels):
 
     return train_data
 
+
+def sig_chns_split3(start_ix, end_ix, train_data, step, fs, size, nfft, idx_band, log_power):
+    csa_list = []
+    times_csa = []
+    for start in range(start_ix, end_ix, step):
+        segment = train_data[:, start_ix:start_ix + size]  # (start_ix + size if start_ix + size < end_ix else end_ix)
+        f, psd = welch(segment*1e6, fs=fs, nperseg=size, nfft=nfft)
+        psd_band = psd[:, idx_band]
+        if log_power:
+            psd_band = 10 * np.log10(psd_band + 1e-12)  # dB
+
+        csa_list.append(psd_band)
+        times_csa.append((start + size / 2) / fs)
+
+    return csa_list, times_csa
+
+def sig_chns_split2(start_ix, train_data, fs, size, nfft, idx_band, log_power):
+    # for start in range(0, train_data.shape[1] - size + 1, step):
+    segment = train_data[:, start_ix:start_ix + size]
+    f, psd = welch(segment*1e6, fs=fs, nperseg=size, nfft=nfft)
+    psd_band = psd[:, idx_band]
+    if log_power:
+        psd_band = 10 * np.log10(psd_band + 1e-12)  # dB
+
+    csa_list = psd_band
+    times_csa = (start_ix + size / 2) / fs
+
+    return csa_list, times_csa
+
 def abp_rbp_com_t1(train_data, sim_chns, channels, sample_frequency, bp_type, task_id):
     train_data = train_data[:, [sim_chns.index(chn) for chn in channels], :]
 
@@ -1659,18 +1688,24 @@ def multi_chns_rav(start_seconds, stop_seconds, raw, ttype, channels, fs, task_i
     # return channel_values
 
 def parallel_chns_split2(start_seconds, stop_seconds, step, raw, channels, n_jobs=3):
-    range_length = int(np.ceil(((stop_seconds - start_seconds) / step) / n_jobs))
+    range_length = int((stop_seconds - start_seconds) / (step * n_jobs))  # int(np.ceil(((stop_seconds - start_seconds) / step) / n_jobs))
+    if (stop_seconds - start_seconds) % (step * n_jobs) > 0:
+        n_jobs = n_jobs + 1
+
     filtered = Parallel(n_jobs=n_jobs)(delayed(sig_chns_split1)(start_ix, (start_ix+range_length*step if
-        start_ix+range_length*step <=stop_seconds else stop_seconds), step, raw, channels)
+        start_ix+range_length*step < stop_seconds else stop_seconds), step, raw, channels)
         for start_ix in np.arange(start_seconds, stop_seconds, range_length*step))
     train_data = np.concatenate(filtered, axis=0)
     train_data = train_data.reshape((train_data.shape[0] * train_data.shape[1], train_data.shape[2]))
     return train_data   # np.array(filtered)
 
 def parallel_chns_split1(start_seconds, stop_seconds, step, raw, channels, n_jobs=3):
-    range_length = int(np.ceil(((stop_seconds - start_seconds) / step) / n_jobs))
+    range_length = int((stop_seconds - start_seconds) / (step * n_jobs))  # int(np.ceil(((stop_seconds - start_seconds) / step) / n_jobs))
+    if (stop_seconds - start_seconds) % (step * n_jobs) > 0:
+        n_jobs = n_jobs + 1
+
     filtered = Parallel(n_jobs=n_jobs)(delayed(sig_chns_split)(start_ix, (start_ix+range_length*step if
-        start_ix+range_length*step <=stop_seconds else stop_seconds), step, raw, channels)
+        start_ix+range_length*step < stop_seconds else stop_seconds), step, raw, channels)
         for start_ix in np.arange(start_seconds, stop_seconds, range_length*step))
     return np.array(filtered)
 
@@ -1678,8 +1713,7 @@ def parallel_chns_split(start_seconds, stop_seconds, step, raw, channels, n_jobs
     filtered = Parallel(n_jobs=n_jobs)(delayed(sig_chns_split)(start_ix, start_ix+step, step, raw, channels) for start_ix in np.arange(start_seconds, stop_seconds, epoch_length))
     return np.array(filtered)
 
-def multi_chns_csa(start_seconds, stop_seconds, raw, ttype, channels, fs, task_id, band=(0.5, 30), window=epoch_length, overlap=0.8, nfft=None, log_power=True):
-    start_time1 = time.time()
+def multi_chns_csa(start_seconds, stop_seconds, raw, channels, fs, task_id, band=(0.5, 30), window=epoch_length, overlap=0.8, nfft=None, log_power=True):
     size = int(window * fs)
     step = int(size * (1 - overlap))  # epoch_length  # int(size * (1 - overlap) * epoch_length)
     chn_num = len(channels)
@@ -1690,24 +1724,49 @@ def multi_chns_csa(start_seconds, stop_seconds, raw, ttype, channels, fs, task_i
     freqs, _ = welch(np.zeros(size), fs=fs, nperseg=size, nfft=nfft)
     idx_band = np.logical_and(freqs >= band[0], freqs <= band[1])
     freqs = freqs[idx_band]
-    print("读取BDF完成， %.8s s" % (time.time() - start_time1))
+    # print("获取freqs完成， %.8s s" % (time.time() - start_time1))
     # train_data = np.squeeze(train_data, 1)
     csa_list = []
     times = []
     start, stop = raw.time_as_index([start_seconds, stop_seconds])
     train_data = raw[[raw.ch_names.index(chn_name) for chn_name in channels], start:stop][0]
-    for start in range(0, train_data.shape[1] - size + 1, step):
-        segment = train_data[:, start:start + size]
-        f, psd = welch(segment*1e6, fs=fs, nperseg=size, nfft=nfft)
-        psd_band = psd[:, idx_band]
-        if log_power:
-            psd_band = 10 * np.log10(psd_band + 1e-12)  # dB
 
-        csa_list.append(psd_band)
-        times.append((start + size / 2) / fs)
+    # for start_ix in range(start, train_data.shape[1] - size + 1, step):
+    #     segment = train_data[:, start_ix:start_ix + size]
+    #     f, psd = welch(segment*1e6, fs=fs, nperseg=size, nfft=nfft)
+    #     psd_band = psd[:, idx_band]
+    #     if log_power:
+    #         psd_band = 10 * np.log10(psd_band + 1e-12)  # dB
+    #
+    #     csa_list.append(psd_band)
+    #     times.append((start_ix + size / 2) / fs)
+
+    n_jobs = chn_num * 2 if chn_num * 2 <= 6 else 6
+    stop = train_data.shape[1] - size + 1
+    # filtered = Parallel(n_jobs=n_jobs)(
+    #     delayed(sig_chns_split2)(start_ix, train_data, fs, size, nfft, idx_band, log_power) for start_ix in
+    #     np.arange(start, stop, step))
+    # csa_list = [res[0] for res in filtered]
+    # times = [res[1] for res in filtered]
+
+    range_length = int((stop - start) / (step * n_jobs))  # int(np.ceil(((stop - start) / step) / n_jobs))
+    if (stop - start) % (step * n_jobs) > 0:
+        n_jobs = n_jobs + 1
+    filtered = Parallel(n_jobs=n_jobs)(delayed(sig_chns_split3)(start_ix, (
+        start_ix + range_length * step if start_ix + range_length * step < stop else stop), train_data, step, fs, size,
+                                                                nfft, idx_band, log_power)
+                                       for start_ix in np.arange(start, stop, range_length * step))
+    times = []
+    for ix in range(len(filtered)):
+        if ix == 0:
+            csa_list = filtered[ix][0]
+
+        else:
+            csa_list = np.vstack([csa_list, filtered[ix][0]])
+        times.extend(filtered[ix][1])
 
     # csa_matrix = np.array(csa_list).T
-    print("频谱计算完成， %.8s s" % (time.time() - start_time1))
+    # print("频谱计算完成， %.8s s" % (time.time() - start_time1))
     channel_values1 = np.array(np.round(csa_list, 2))  # .T
     # print("channel_values1 shape: ", channel_values1.shape)
     if chn_num > 1:
@@ -1717,18 +1776,17 @@ def multi_chns_csa(start_seconds, stop_seconds, raw, ttype, channels, fs, task_i
     else:
         channel_values = [np.squeeze(channel_values1).tolist()]
 
-    ### End
-    print("输出格式调整完成， %.8s s" % (time.time() - start_time1))
-    # ana_type = ttype
-    # tk = str(channels)
-    # tk = tk.replace("\'", "\"")
-    # result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {channel_values}" + " }"
-    #
-    # return result
+    # print("输出格式调整完成， %.8s s" % (time.time() - start_time1))
+    ana_type = 'CSA'
+    tk = str(channels)
+    tk = tk.replace("\'", "\"")
+    result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {channel_values}" + " }"
+
+    return result
     # print("channel_values: ", channel_values)
-    print("ttype ", ttype)
-    print(type(channel_values), len(channel_values))
-    return channel_values, freqs, np.array(times)
+    # print("ttype ", ttype)
+    # print(type(channel_values), len(channel_values))
+    # return channel_values, freqs, np.array(times)
 
 # def multi_chns_csa(start_seconds, stop_seconds, raw, ttype, channels, fs, task_id, band=(0.5, 30), window=2.0, overlap=0.95, nfft=None, log_power=True):
 #     size = int(window * fs)
@@ -1892,6 +1950,7 @@ def envelope_his(sigbufs, special_electrodes, total_chns, channels, fs, task_id)
     return result
     # print("Env计算完成， %.8s s" % (time.time() - start_time1))
     # print("channel_values: ", channel_values)
+    # print(type(channel_values), len(channel_values))
     # return channel_values
 
 def multi_chns_env(start_seconds, stop_seconds, special_electrodes, raw, ttype, channels, fs, history_monitor, task_id):
@@ -2857,7 +2916,7 @@ def qteeg_history(request):
 
                     elif ttype == trend_name[5]:
                         csa_t = threading.Thread(target=thread_workers, args=(multi_chns_csa, (
-                            start_seconds, stop_seconds, raw, ttype, trend_chns_sim_dict["CSA"], sample_frequency,
+                            start_seconds, stop_seconds, raw, trend_chns_sim_dict["CSA"], sample_frequency,
                             json_data["taskID"]), result_queue))
                         threads.append(csa_t)
                         csa_t.start()
@@ -2916,7 +2975,7 @@ def qteeg_history(request):
                         # threads.append(sef_t)
                         # sef_t.start()
                         sef_t = threading.Thread(target=thread_workers, args=(multi_chns_sef1, (
-                            train_data, chn_list_sim, trend_chns_sim_dict["SEF"], sample_frequency,
+                            train_data, total_chns, trend_chns_sim_dict["SEF"], sample_frequency,
                             json_data["taskID"]), result_queue))
                         threads.append(sef_t)
                         sef_t.start()
@@ -3243,7 +3302,7 @@ def plot_csa(rbp_features, freqs_csa, times_csa, tmp_data_path, ttype, fig_name)
 
 tkk = 8
 if __name__ == '__main__':
-    is_history = 4  # 1-history 0-monitor 2-abp 3-rbp 4-env 5-rbp_sim 6-abr
+    is_history = 6  # 1-history 0-monitor 2-abp 3-rbp 4-env 5-rbp_sim 6-abr
     signal_type = 1  # 1-signal 2-sin
     time_cn = 0
 
@@ -3342,28 +3401,28 @@ if __name__ == '__main__':
             if '.bdf' not in fname:
                 continue
 
-            raw = mne.io.read_raw_bdf(os.path.join(file_path, fname), include=['Fp1'])  # , preload=True
+            raw = mne.io.read_raw_bdf(os.path.join(file_path, fname), include=['Fp1', 'T4', 'F3'])  # , preload=True , 'T4'
             # raw = raw.filter(l_freq=2, h_freq=70)
             sample_frequency = raw.info['sfreq']
 
             start_seconds = 0
             stop_seconds = round(raw.n_times / sample_frequency, 2)
             signal_seconds = round(raw.n_times / sample_frequency, 2)  # 信号总时长 4750
-
+            print("读取BDF完成， %.8s s" % (time.time() - start_time1))
             # train_data = sig_chns_split(start_seconds, stop_seconds, epoch_length, raw, raw.ch_names)
-            sigbufs = signal_read(start_seconds, stop_seconds, raw, 'history')
-
-            if 1:
-                # train_data = sig_chns_split1(start_seconds, stop_seconds, epoch_length, raw, chn_list_sim)
-                train_data = signal_split(start_seconds, stop_seconds, sigbufs, epoch_length, sample_frequency)
-
+            # sigbufs = signal_read(start_seconds, stop_seconds, raw, 'history')
+            #
+            # if 1:
+            #     # train_data = sig_chns_split1(start_seconds, stop_seconds, epoch_length, raw, chn_list_sim)
+            #     train_data = signal_split(start_seconds, stop_seconds, sigbufs, epoch_length, sample_frequency)
+            # print("时间分片完成， %.8s s" % (time.time() - start_time1))
             #
             # channel_values = abp_rbp(train_data, sample_frequency, 'rbp', 'history')
             # channel_values = multi_chns_adr_abr(start_seconds, stop_seconds, raw, 'ABR', ['Fp1', 'T4'], sample_frequency, 'abr',
             #     '123456')
             # channel_values = multi_chns_sef(
             #     start_seconds, stop_seconds, raw, 'SEF', ['Fp1'], sample_frequency, '123456')
-            channel_values, freqs_csa, times_csa =multi_chns_csa(start_seconds, stop_seconds, raw, 'CSA', ['Fp1', 'T4'], sample_frequency, '123456')
+            channel_values, freqs_csa, times_csa =multi_chns_csa(start_seconds, stop_seconds, raw, 'CSA', ['Fp1', 'T4', 'F3'], sample_frequency, '123456')
             # for chn in range(len(channel_values)):
             #     # RBP波形
             #     plot_csa(np.array(channel_values[chn]).T, freqs_csa, times_csa, '/disk1/workspace/py39_tf270/SleepEpilepsy1/resource/test/sleepstage/JJY/', 'CSA', raw.ch_names[chn] + '_csa.png')
@@ -3420,7 +3479,7 @@ if __name__ == '__main__':
         #     start_seconds, stop_seconds, raw, ttype, ['T3', 'T4'], int(raw.info['sfreq']), '123456')  # 4
         # channel_values = multi_chns_csa(
         #     start_seconds, stop_seconds, raw, ttype, ['Fp1'], int(raw.info['sfreq']), '123456')  # 5
-        channel_values = envelope_his(train_data, special_electrodes, raw.ch_names, ["Fp1-REF", 'T4-REF'], int(raw.info['sfreq']), '12')
+        channel_values = envelope_his(train_data, special_electrodes, raw.ch_names, ["Fp1-REF"], int(raw.info['sfreq']), '12')
         # channel_values = multi_chns_env(start_seconds, stop_seconds, [], raw, ttype, ["Fp1-REF", 'T4-REF'],
         #     int(raw.info['sfreq']), 'history', '123456')  # 6
 
