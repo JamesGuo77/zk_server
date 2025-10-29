@@ -28,6 +28,9 @@ import threading
 import queue
 import requests
 
+from collections import OrderedDict
+from django.core.cache import cache
+
 # 2025/6/6 V0.1 init pyedflib读取bdf 并完成aEEG
 # 2025/6/8 V0.2 修复2400-3000s运行报错
 # 2025/6/9 V0.3 采用mne读取bdf 并行计算效率提升不明显暂放弃
@@ -62,6 +65,8 @@ import requests
 # view11s 暂停更新
 # 2025/10/21 V2.5 CSA优化
 # view12 暂停更新
+# 2025/10/28 V2.6 aEEG monitor 缓存计算延迟1s
+
 
 epoch_length = 10  # s
 trend_name = ["aEEG", "ABP", "RBP", "RAV", "SE", "CSA", "Envelope", "TP", "ADR", "ABR", "SEF"]
@@ -219,8 +224,9 @@ def butter_bandpass(lowcut, highcut, fs, order=5):
     b = butter(order, [nor_lowcut, nor_highcut], btype='band', output='sos')
     return b
 
+# aEEG_compute_h1 = {tk} + aEEG_com_t
 def aEEG_compute_h1(input_data_dict, band, window_length):
-    channles = len([channel for channel in input_data_dict['labels']])  #  if 'EEG' in channel
+    channles = len([channel for channel in input_data_dict['labels']])  #  trendChannels if 'EEG' in channel
     data_values = np.array(input_data_dict['values'][:channles])
 
     channel_labels = input_data_dict['labels'][:channles]
@@ -335,82 +341,247 @@ def aeeg_monitor(request):
         error_message["message"] = "The request method is incorrect"
         return HttpResponse(json.dumps(error_message))
 
-
-def qeeg_monitor(request):
+def qteeg_monitor(request):
     if request.method == 'POST':
         if request.content_type == 'application/json':
             jsonStr = request.body.decode('utf-8')
-            input_data_dict = json.loads(jsonStr)
-            additional_input = json.loads(input_data_dict["additionalInput"])
+            json_data = json.loads(jsonStr)
+
+            additional_input = json.loads(json_data["additionalInput"])
             band_tmp = additional_input["band"].split(":")
             band = [int(band_tmp[0]), int(band_tmp[1])]
             window_length = int(additional_input["windowLength"])
 
-            # channel_labels, channel_values = aEEG_compute_h1(input_data_dict, band, window_length)  # utp, ltp
-            # aEEG_com1(input_data_dict, band, window_length)
-            aEEG_labels, aEEG_values = aEEG_com1(input_data_dict, band, window_length)
-            # abp bp_type: 0-abp and rbp 1-abp 2-rbp abp_rbp_com1(input_data_dict, bp_type)
-            abp_labels, abp_values, rbp_values = abp_rbp_com1(input_data_dict, 'abp')
+            trend_channels = json_data['trendChannels']
+            trend_chns_dict, trend_chns_sim_dict = {}, {}  # list(dict)
+            total_chns = []
 
-            task_id = input_data_dict["taskID"]
-            ana_type = "aEEG_abp"
-            qeeg_type = "aEEG"
-            qeeg_type1 = "abp"
+            for tchns in trend_channels:  # aEEG、RBP、ABP、RAV、SE（Spectral Edge）、CSA、Envelope、TP、ADR、ABR
+                if tchns["type"] in trend_name:
+                    if tchns["type"] in trend_chns_dict.keys():
+                        trend_chns_sim_dict[tchns["type"]].append(tchns["signal"])
+                        # trend_chns_dict[tchns["type"]].append(tchns["signal"])  # label
+                    else:
+                        trend_chns_sim_dict[tchns["type"]] = [tchns["signal"]]
+                        # trend_chns_dict[tchns["type"]] = [tchns["signal"]]  # label
 
-            tk = str(aEEG_labels)
-            tk = tk.replace("\'", "\"")
-            tk1 = str(abp_labels)
-            tk1 = tk1.replace("\'", "\"")
-            qeeg_data = "{ " + f" \"type\": \"{qeeg_type}\", \"labels\": {tk}, \"values\": {aEEG_values}" + " }"
-            qeeg_data1 = "{ " + f" \"type\": \"{qeeg_type1}\", \"labels\": {tk1}, \"values\": {abp_values}" + " }"
-            qeeg_data2 = "[" + f"{qeeg_data}" + ", " + f"{qeeg_data1}" + "]"
+                    if tchns["signal"] not in total_chns:
+                        total_chns.append(tchns["signal"])
 
-            # result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {channel_values}" + " }"
-            result = "{ " + f"\"taskID\": \"{task_id}\", \"qeeg_data\": {qeeg_data2}" + " }"
 
-            return HttpResponse(result)
-            # return HttpResponse(json.dumps(success_message))
+            # for ttype in trend_chns_dict.keys():
+            #     chns_split = []
+            #     for chns in trend_chns_dict[ttype]:
+            #         chn_split = chns.split('-')
+            #         chns_split.append(chn_split[0])
+            #         chns_split.append(chn_split[1])
+            #     chns_split = list(set(chns_split))
+            #     trend_chns_sim_dict[ttype] = [chn for chn in chns_split if chn not in ('AV', 'Ref', 'REF', 'ref')]
+            #
+            # chn_list_sim = list({item for sublist in trend_chns_sim_dict.values() for item in
+            #                      sublist})  # list(set(aeeg_chns_sim + rbp_chns_sim))
 
-        else:
-            error_message["message"] = "The content type is incorrect. Please input it application/json"
-            return HttpResponse(json.dumps(error_message))
-    else:
-        error_message["message"] = "The request method is incorrect"
-        return HttpResponse(json.dumps(error_message))
+            channles = len(total_chns)  # trendChannels if 'EEG' in channel
+            data_values = np.array(input_data_dict['values'][:channles])
 
-def qteeg_monitor(request):  # 待验证
-    if request.method == 'POST':
-        if request.content_type == 'application/json':
-            jsonStr = request.body.decode('utf-8')
-            input_data_dict = json.loads(jsonStr)
-            additional_input = json.loads(input_data_dict["additionalInput"])
-            band_tmp = additional_input["band"].split(":")
-            band = [int(band_tmp[0]), int(band_tmp[1])]
-            window_length = int(additional_input["windowLength"])
-            qeeg_act = additional_input["windowLength"]  # aEEG、RBP、ABP、RAV、SE（Spectral Edge）、CSA、Envelope、TP、ADR、ABR
+            # channel_labels = input_data_dict['labels'][:channles]
+            sample_frequency = int(input_data_dict['samples'][0])
 
-            # 创建线程
-            aEEG_t = threading.Thread(target=aEEG_com_t, args=(
-            start_seconds, stop_seconds, raw, channels, sample_frequency, input_data_dict["taskID"]))  # Lack specialElectronode
-            abp_t = threading.Thread(target=abp_rbp_com_t, args=(
-            start_seconds, stop_seconds, raw, trend_name[1], channels, sample_frequency, 'abp', input_data_dict["taskID"]))
+            # TODO 多个bdf文件读取
+            # for fname in os.listdir(json_data['fileDir']):  # 寻找.rml文件
+            #     if '.bdf' not in fname:
+            #         continue
+            #     raw = mne.io.read_raw_bdf(os.path.join(json_data['fileDir'], fname), include=tuple(chn_list_sim))  # , preload=True tuple(chn_list_sim)
+                # raw = raw.filter(l_freq=2, h_freq=70)
+                # sample_frequency = raw.info['sfreq']
 
-            # 启动线程
-            aEEG_t.start()
-            abp_t.start()
+            # start_seconds = int(json_data['startSeconds'])  # 4200
+            # stop_seconds = int(json_data['stopSeconds'])  # 4763 (4800)
+            #
+            # signal_seconds = round(raw.n_times / sample_frequency, 2)  # 信号总时长 4750
+            #
+            # if start_seconds > signal_seconds:  # 不分析
+            #     error_message["message"] = "The start senonds is over signal lengths! Read signal failure. "
+            #     return HttpResponse(json.dumps(error_message))
+            #
+            # elif start_seconds > stop_seconds:  #
+            #     error_message["message"] = "The start senonds is over stop senonds! Read signal failure. "
+            #     return HttpResponse(json.dumps(error_message))
+            #
+            # elif stop_seconds > signal_seconds:
+            #     stop_seconds = signal_seconds
+            #
+            # if (stop_seconds - start_seconds) < epoch_length:
+            #     error_message["message"] = "The start and stop senonds interval is less than epoch_length! Read signal failure. "
+            #     return HttpResponse(json.dumps(error_message))
+
+            # sigbufs = signal_read(start_seconds, stop_seconds, raw, 'history')
+            #
+            # if len(list(set(trend_name_split).intersection(set(list(trend_chns_dict.keys()))))) > 0:
+            #     # train_data = sig_chns_split1(start_seconds, stop_seconds, epoch_length, raw, chn_list_sim)
+            #     train_data = signal_split(start_seconds, stop_seconds, sigbufs, epoch_length, sample_frequency)
+
+            threads = []  ## 需考虑history和monitor同时调用情况
+            total_chns = raw.ch_names
+            for ttype in trend_chns_dict.keys():  # "ABP", "RBP",
+                if ttype == trend_name[0]:  # ["aEEG", "ABP", "RBP", "RAV", "SE", "CSA", "Envelope", "TP", "ADR", "ABR"]
+                    sigbufs1 = get_hot_products(json_data["taskID"], data_values, trend_chns_dict["aEEG"], sample_frequency)
+                    # print("sigbufs shape: ", sigbufs.shape)
+                    aEEG_t = threading.Thread(target=thread_workers, args=(aEEG_his, (
+                    sigbufs1, [], total_chns, trend_chns_dict["aEEG"],
+                    sample_frequency, band, window_length, 'monitor', json_data["taskID"]), result_queue))
+                    # 启动线程
+                    threads.append(aEEG_t)
+                    aEEG_t.start()
+
+                elif ttype == trend_name[1]:
+                    abp_t = threading.Thread(target=thread_workers, args=(abp_rbp_com_t1, (
+                        train_data, total_chns, trend_chns_sim_dict["ABP"], sample_frequency,
+                        'ABP', json_data["taskID"]), result_queue))
+                    threads.append(abp_t)
+                    abp_t.start()
+
+                elif ttype == trend_name[2]:
+                    rbp_t = threading.Thread(target=thread_workers, args=(abp_rbp_com_t1, (
+                        train_data, total_chns, trend_chns_sim_dict["RBP"], sample_frequency,
+                        'RBP', json_data["taskID"]), result_queue))
+                    threads.append(rbp_t)
+                    rbp_t.start()
+
+                # elif ttype == trend_name[3]:
+                #     rav_t = threading.Thread(target=thread_workers, args=(multi_chns_rav, (
+                #         start_seconds, stop_seconds, raw, ttype, trend_chns_sim_dict["RAV"], sample_frequency,
+                #         json_data["taskID"]), result_queue))
+                #     threads.append(rav_t)
+                #     rav_t.start()
+
+                elif ttype == trend_name[4]:
+                    se_t = threading.Thread(target=thread_workers, args=(multi_chns_se1, (
+                        train_data, total_chns, trend_chns_sim_dict["SE"], sample_frequency,
+                        json_data["taskID"]), result_queue))
+                    threads.append(se_t)
+                    se_t.start()
+
+                # elif ttype == trend_name[5]:
+                #     csa_t = threading.Thread(target=thread_workers, args=(multi_chns_csa, (
+                #         start_seconds, stop_seconds, raw, trend_chns_sim_dict["CSA"], sample_frequency,
+                #         json_data["taskID"]), result_queue))
+                #     threads.append(csa_t)
+                #     csa_t.start()
+
+                elif ttype == trend_name[6]:
+                    env_t = threading.Thread(target=thread_workers, args=(envelope_his, (
+                        train_data, json_data['specialElectrodes'], total_chns,
+                        trend_chns_dict["Envelope"], sample_frequency, json_data["taskID"]), result_queue))
+                    threads.append(env_t)
+                    env_t.start()
+
+                elif ttype == trend_name[7]:
+                    tp_t = threading.Thread(target=thread_workers, args=(multi_chns_tp1, (
+                        train_data, total_chns, trend_chns_sim_dict["TP"], sample_frequency,
+                        'history', json_data["taskID"]), result_queue))
+                    threads.append(tp_t)
+                    tp_t.start()
+
+
+                elif ttype == trend_name[8]:
+                    adr_t = threading.Thread(target=thread_workers, args=(multi_chns_adr_abr1, (
+                        train_data, total_chns, trend_chns_sim_dict["ADR"], sample_frequency,
+                        'ADR', json_data["taskID"]), result_queue))
+                    threads.append(adr_t)
+                    adr_t.start()
+
+                elif ttype == trend_name[9]:
+                    abr_t = threading.Thread(target=thread_workers, args=(multi_chns_adr_abr1, (
+                        train_data, total_chns, trend_chns_sim_dict["ABR"], sample_frequency,
+                        'ABR', json_data["taskID"]), result_queue))
+                    threads.append(abr_t)
+                    abr_t.start()
+
+                elif ttype == trend_name[10]:
+                    sef_t = threading.Thread(target=thread_workers, args=(multi_chns_sef1, (
+                        train_data, total_chns, trend_chns_sim_dict["SEF"], sample_frequency,
+                        json_data["taskID"]), result_queue))
+                    threads.append(sef_t)
+                    sef_t.start()
+
 
             # 等待所有线程结束
-            aEEG_t.join()
-            abp_t.join()
+            for tt in threads:
+                tt.join()
 
-            return HttpResponse(json.dumps(success_message))
+            # 合并结果
+            results = []
+            while not result_queue.empty():
+                results.append(result_queue.get())
 
+            task_id = json_data["taskID"]
+            type_values = {}
+            channel_values = []
+            for js in results:
+                json_data = json.loads(js)
+                if json_data["taskID"] == task_id:
+                    chn_l = list(json_data["labels"])
+                    chn_values = np.array(json_data["values"])
+                    for inx in range(len(chn_l)):
+                        type_values[json_data['type'] + chn_l[inx]] = chn_values[inx]
+
+            for tchns in trend_channels:  # aEEG、RBP、ABP、RAV、SE（Spectral Edge）、CSA、Envelope、TP、ADR、ABR
+                # aEEG and Envelope unit is uV, return type+label, others return type+signal
+                if (tchns["type"] == trend_name[0]) or (tchns["type"] == trend_name[6]):
+                    type_chn = tchns["type"] + tchns["label"]
+                else:
+                    type_chn = tchns["type"] + tchns["signal"]
+
+                channel_values.append(type_values[type_chn].tolist())
+                # print(type_chn, type_values[type_chn].shape, len(type_values[type_chn].shape))
+
+            tk = str(trend_channels)
+            tk = tk.replace("\'", "\"")
+
+            result = "{ " + f"\"taskID\": \"{task_id}\", \"trendChannels\": {tk}, \"values\": {channel_values}" + " }"
+
+            return HttpResponse(result)  # results
         else:
             error_message["message"] = "The content type is incorrect. Please input it application/json"
             return HttpResponse(json.dumps(error_message))
     else:
         error_message["message"] = "The request method is incorrect"
         return HttpResponse(json.dumps(error_message))
+
+# def qteeg_monitor(request):  # 待验证
+#     if request.method == 'POST':
+#         if request.content_type == 'application/json':
+#             jsonStr = request.body.decode('utf-8')
+#             input_data_dict = json.loads(jsonStr)
+#             additional_input = json.loads(input_data_dict["additionalInput"])
+#             band_tmp = additional_input["band"].split(":")
+#             band = [int(band_tmp[0]), int(band_tmp[1])]
+#             window_length = int(additional_input["windowLength"])
+#             qeeg_act = additional_input["windowLength"]  # aEEG、RBP、ABP、RAV、SE（Spectral Edge）、CSA、Envelope、TP、ADR、ABR
+#
+#             # 创建线程
+#             aEEG_t = threading.Thread(target=aEEG_com_t, args=(
+#             start_seconds, stop_seconds, raw, channels, sample_frequency, input_data_dict["taskID"]))  # Lack specialElectronode
+#             abp_t = threading.Thread(target=abp_rbp_com_t, args=(
+#             start_seconds, stop_seconds, raw, trend_name[1], channels, sample_frequency, 'abp', input_data_dict["taskID"]))
+#
+#             # 启动线程
+#             aEEG_t.start()
+#             abp_t.start()
+#
+#             # 等待所有线程结束
+#             aEEG_t.join()
+#             abp_t.join()
+#
+#             return HttpResponse(json.dumps(success_message))
+#
+#         else:
+#             error_message["message"] = "The content type is incorrect. Please input it application/json"
+#             return HttpResponse(json.dumps(error_message))
+#     else:
+#         error_message["message"] = "The request method is incorrect"
+#         return HttpResponse(json.dumps(error_message))
 
 def read_bdf1(sigbufs, signal_labels, channels, node_dict):
     sigbufs_res = np.zeros((sigbufs.shape[0], len(channels), sigbufs.shape[2]))
@@ -2776,6 +2947,43 @@ def multi_chns_se(start_seconds, stop_seconds, raw, ttype, channels, fs, task_id
 #         error_message["message"] = "The request method is incorrect"
 #         return HttpResponse(json.dumps(error_message))
 
+def get_hot_products(cache_key, sigbuf, chns, sample_frequency):
+    # 定义唯一缓存键
+    # cache_key = "hot_products"
+    # if len(sigbuf.shape) < 2:
+    #     sigbuf = sigbuf.reshape((1, len(sigbuf)))
+    # else:
+    #     sigbuf = sigbuf
+    print("sigbuf shape: ", sigbuf.shape)
+    # 尝试从缓存获取
+    products = cache.get(cache_key)
+    if products is None:
+        # 缓存未命中：查询数据库（耗时操作）
+        sigbuf1 = sigbuf
+        products = sigbuf1.tobytes()
+
+    else:
+        # byte解析为numpy.array
+        cache_data = np.frombuffer(products, dtype=sigbuf.dtype)
+        sec_num = int(len(cache_data) / (len(chns) * sample_frequency))
+
+        # 分解为[sec, chns, fs]
+        sigbuf1 = cache_data.reshape((sec_num, len(chns), sample_frequency))
+
+        sigbuf1 = sigbuf1.swapaxes(0, 1)
+        # 变换为[chns, sec*fs]
+        sigbuf1 = sigbuf1.reshape((sigbuf1.shape[0], sigbuf1.shape[1] * sigbuf1.shape[2]))
+        # 加入当前sigbuf 以列存放
+        sigbuf1 = np.hstack([sigbuf1, sigbuf])
+        if sec_num == 10:
+            sigbuf1 = sigbuf1[:, sample_frequency:]
+        products = sigbuf1.tobytes()  # sigbuf.tobytes()
+
+    # 存入缓存，设置超时时间（30分钟，根据更新频率调整）
+    cache.set(cache_key, products, 60 * 3)  # 20s , 60 * 60 * 10
+
+    return sigbuf1
+
 def qteeg_history(request):
     if request.method == 'POST':
         if request.content_type == 'application/json':
@@ -2811,7 +3019,7 @@ def qteeg_history(request):
                     continue
                 raw = mne.io.read_raw_bdf(os.path.join(json_data['fileDir'], fname), include=tuple(chn_list_sim))  # , preload=True tuple(chn_list_sim)
                 # raw = raw.filter(l_freq=2, h_freq=70)
-                sample_frequency = raw.info['sfreq']
+                sample_frequency = int(raw.info['sfreq'])
 
                 start_seconds = int(json_data['startSeconds'])  # 4200
                 stop_seconds = int(json_data['stopSeconds'])  # 4763 (4800)
@@ -2864,9 +3072,14 @@ def qteeg_history(request):
                         # aEEG_t = threading.Thread(target=thread_workers, args=(aEEG_com_t, (
                         # start_seconds, stop_seconds, json_data['specialElectrodes'], raw, ttype, trend_chns_dict["aEEG"],
                         # sample_frequency, 'history', json_data["taskID"]), result_queue))
+                        band = [2, 15]
+                        window_length = 1
+
+                        # sigbufs1 = get_hot_products(json_data["taskID"], sigbufs, trend_chns_dict["aEEG"], sample_frequency)
+                        # print("sigbufs shape: ", sigbufs.shape)
                         aEEG_t = threading.Thread(target=thread_workers, args=(aEEG_his, (
                         sigbufs, json_data['specialElectrodes'], total_chns, trend_chns_dict["aEEG"],
-                        sample_frequency, json_data["taskID"]), result_queue))
+                        sample_frequency, band, window_length, 'history', json_data["taskID"]), result_queue))
                         # 启动线程
                         threads.append(aEEG_t)
                         aEEG_t.start()
@@ -3005,9 +3218,22 @@ def qteeg_history(request):
                     # aEEG and Envelope unit is uV, return type+label, others return type+signal
                     if (tchns["type"] == trend_name[0]) or (tchns["type"] == trend_name[6]):
                         type_chn = tchns["type"] + tchns["label"]
+                        ### Start
+                        # print("type_values len: ", len(type_values[type_chn]))
+                        # if len(type_values[type_chn]) < 2:
+                        #     print([])
+                        #     channel_values.append([])
+                        #
+                        # else:
+                        #     print(type_values[type_chn].tolist()[-2])
+                        #     channel_values.append(type_values[type_chn].tolist()[-2])
+                        # print(type(type_values[type_chn]), len(type_values[type_chn]))
+                        # print(type_values[type_chn].tolist())
+                        ### End
                     else:
                         type_chn = tchns["type"] + tchns["signal"]
 
+                        # channel_values.append(type_values[type_chn].tolist())
                     channel_values.append(type_values[type_chn].tolist())
                     # print(type_chn, type_values[type_chn].shape, len(type_values[type_chn].shape))
 
@@ -3106,12 +3332,15 @@ def sig_uv_read(start_seconds, stop_seconds, special_electrodes, raw, channels, 
 
     return sigbufs_res
 
-def aEEG_his(sigbufs, special_electrodes, total_chns, channels, sample_frequency, task_id):
+def aEEG_his(sigbufs, special_electrodes, total_chns, channels, sample_frequency, band, window_length, history_monitor, task_id):
     # sigbufs_res = sig_uv_read(start_seconds, stop_seconds, special_electrodes, raw, channels, sample_frequency, history_monitor)
-    sigbufs_res = sig_uv_read1(sigbufs, special_electrodes, total_chns, channels)
+    if history_monitor == 'history':
+        sigbufs_res = sig_uv_read1(sigbufs, special_electrodes, total_chns, channels)
+
+    elif history_monitor == 'monitor':
+        sigbufs_res = sigbufs[[total_chns.index(chn) for chn in channels], :]
     # print("读入bdf并合并基础电极幅值完成， %.8s s" % (time.time() - start_time1))
-    band = [2, 15]
-    window_length = 1
+
     # aEEG_compute_h
     aEEG_labels, aEEG_values = aEEG_compute_h3(sigbufs_res, channels, sample_frequency, band, window_length)  # utp, ltp
     # print("aEEG计算完成， %.8s s" % (time.time() - start_time1))
@@ -3126,7 +3355,7 @@ def aEEG_his(sigbufs, special_electrodes, total_chns, channels, sample_frequency
     # print(ttype, aEEG_values)
     # return result
 
-def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, ttype, channels, sample_frequency, history_monitor, task_id):
+def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, channels, sample_frequency, history_monitor, task_id):
     # start_inx = int(sample_frequency * start_seconds)  # 可以为float类型
     # stop_inx = int(sample_frequency * stop_seconds)
     # t_idx = raw.time_as_index([start_inx, stop_inx], use_rounding=True)
@@ -3145,7 +3374,7 @@ def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, ttype, chan
     aEEG_labels, aEEG_values = aEEG_compute_h3(sigbufs_res, channels, sample_frequency, band, window_length)  # utp, ltp
     # print("aEEG计算完成， %.8s s" % (time.time() - start_time1))
 
-    ana_type = ttype
+    ana_type = 'aEEG'
     tk = str(aEEG_labels)
     tk = tk.replace("\'", "\"")
     result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {aEEG_values}" + " }"
@@ -3302,11 +3531,88 @@ def plot_csa(rbp_features, freqs_csa, times_csa, tmp_data_path, ttype, fig_name)
 
 tkk = 8
 if __name__ == '__main__':
-    is_history = 6  # 1-history 0-monitor 2-abp 3-rbp 4-env 5-rbp_sim 6-abr
+    is_history = 0  # 1-history 0-monitor 2-abp 3-rbp 4-env 5-rbp_sim 6-abr
     signal_type = 1  # 1-signal 2-sin
     time_cn = 0
 
-    if is_history == 1:
+    if is_history == 0:
+        # TODO 监测
+        file_path = r"/disk1/workspace/py39_tf270/SleepEpilepsy1/resource/test/sleepstage/20241206184941"  # 20241206184941 20250912110203
+        chn_list_sim = ["Fp1", "T4"]
+        for fname in os.listdir(file_path):  # 寻找.rml文件
+            if '.bdf' not in fname:
+                continue
+
+            input_data_dict = {}
+            if signal_type == 1:
+                raw = mne.io.read_raw_bdf(os.path.join(file_path, fname), include=tuple(chn_list_sim))  # , preload=True ,
+                # raw = raw.filter(l_freq=0.5, h_freq=35)
+                picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
+
+                input_data_dict['labels'] = raw.ch_names
+                input_data_dict['samples'] = [raw.info['sfreq']] * len(raw.ch_names)
+                sample_frequency = raw.info['sfreq']
+                signal_seconds = round(raw.n_times / sample_frequency, 2)
+
+            else:
+                input_data_dict['labels'] = chn_list_sim
+                sampling_rate = 4000  # 采样频率为4000Hz
+                input_data_dict['samples'] =[sampling_rate]
+                duration = 2000  # 信号持续时间为1秒
+                frequency = 10  # 正弦波频率为10Hz
+                sample_frequency = sampling_rate
+
+
+                # 生成时间轴
+                t = np.linspace(0, duration, int(sampling_rate * duration), endpoint=False)
+
+                # 生成正弦信号
+                signal1 = 50 * np.sin(2 * np.pi * frequency * t)
+                signal_seconds = round(len(t)/ sample_frequency, 2)
+
+            utp_t = []
+            ltp_t = []
+            band = [2, 15]  # [int(band_tmp[0]), int(band_tmp[1])]
+            window_length = 1  # int(additional_input["windowLength"])
+            start_inx = int(sample_frequency * 0)  # start_seconds 可以为float类型
+            stop_inx = int(sample_frequency * 1)  # stop_seconds 19000000
+            t_idx = raw.time_as_index([start_inx, stop_inx], use_rounding=True)
+
+            sigbufs, times = raw[picks, int(t_idx[0] / sample_frequency):int(t_idx[1] / sample_frequency)]
+            sigbufs = sigbufs * 1e6
+            # sigbufs1 = get_hot_products('12', sigbufs, ['Fp1'], int(sample_frequency))
+            res = aEEG_his(sigbufs, [], raw.ch_names, ['Fp1'],
+                sample_frequency, band, window_length, 'monitor', '12')
+
+            # start_seconds = 0
+            # stop_seconds = start_seconds + epoch_length  # 10
+            # while stop_seconds < signal_seconds:
+            #     start_inx = int(sample_frequency * start_seconds)  # 可以为float类型
+            #     stop_inx = int(sample_frequency * stop_seconds)  # 19000000
+            #     if signal_type == 1:
+            #         t_idx = raw.time_as_index([start_inx, stop_inx], use_rounding=True)
+            #
+            #         sigbufs, times = raw[picks, int(t_idx[0] / sample_frequency):int(t_idx[1] / sample_frequency)]
+            #         sigbufs = sigbufs * 1e6
+            #         input_data_dict['values'] = np.array(sigbufs[:len(raw.ch_names), :])  # 10s
+            #
+            #     else:
+            #         input_data_dict['values'] = np.array(signal1[start_inx: stop_inx]).reshape((1, stop_inx - start_inx))
+            #
+            #     band = [2, 15]  # [int(band_tmp[0]), int(band_tmp[1])]
+            #     window_length = 1  # int(additional_input["windowLength"])
+            #     # aEEG_labels, aEEG_values = aEEG_com1(input_data_dict, band, window_length)
+            #     abp_labels, abp_values, rbp_values = abp_rbp_com1(input_data_dict, 'abp')
+            #     channel_labels, utp, ltp = aEEG_com1(input_data_dict, band, window_length)  # utp, ltp
+            #     utp_t.extend(utp)
+            #     ltp_t.extend(ltp)
+            #     start_seconds = stop_seconds
+            #     stop_seconds = stop_seconds + epoch_length  # 10
+
+                # aEEG波形
+            # plot_aEEG(utp_t, ltp_t, '/disk1/workspace/py39_tf270/SleepEpilepsy1/resource/test/sleepstage/JJY/')
+
+    elif is_history == 1:
         chn_list = []
         channels = ["Fp1-REF", "T4-REF", "O1-REF"]  #
         for chns in channels:
@@ -3659,71 +3965,7 @@ if __name__ == '__main__':
             }
             print(result)
 
-    elif is_history == 0:
-        # TODO 监测
-        file_path = r"/disk1/workspace/py39_tf270/SleepEpilepsy1/resource/test/sleepstage/20250912110203"  # 20241206184941
-        chn_list_sim = ["Fp1", "T4"]
-        for fname in os.listdir(file_path):  # 寻找.rml文件
-            if '.bdf' not in fname:
-                continue
 
-            input_data_dict = {}
-            if signal_type == 1:
-                raw = mne.io.read_raw_bdf(os.path.join(file_path, fname), include=tuple(chn_list_sim))  # , preload=True ,
-                # raw = raw.filter(l_freq=0.5, h_freq=35)
-                picks = mne.pick_types(raw.info, eeg=True, exclude="bads")
-
-                input_data_dict['labels'] = raw.ch_names
-                input_data_dict['samples'] = [raw.info['sfreq']] * len(raw.ch_names)
-                sample_frequency = raw.info['sfreq']
-                signal_seconds = round(raw.n_times / sample_frequency, 2)
-
-            else:
-                input_data_dict['labels'] = chn_list_sim
-                sampling_rate = 4000  # 采样频率为4000Hz
-                input_data_dict['samples'] =[sampling_rate]
-                duration = 2000  # 信号持续时间为1秒
-                frequency = 10  # 正弦波频率为10Hz
-                sample_frequency = sampling_rate
-
-
-                # 生成时间轴
-                t = np.linspace(0, duration, int(sampling_rate * duration), endpoint=False)
-
-                # 生成正弦信号
-                signal1 = 50 * np.sin(2 * np.pi * frequency * t)
-                signal_seconds = round(len(t)/ sample_frequency, 2)
-
-            utp_t = []
-            ltp_t = []
-
-            start_seconds = 0
-            stop_seconds = start_seconds + epoch_length  # 10
-            while stop_seconds < signal_seconds:
-                start_inx = int(sample_frequency * start_seconds)  # 可以为float类型
-                stop_inx = int(sample_frequency * stop_seconds)  # 19000000
-                if signal_type == 1:
-                    t_idx = raw.time_as_index([start_inx, stop_inx], use_rounding=True)
-
-                    sigbufs, times = raw[picks, int(t_idx[0] / sample_frequency):int(t_idx[1] / sample_frequency)]
-                    sigbufs = sigbufs * 1e6
-                    input_data_dict['values'] = np.array(sigbufs[:len(raw.ch_names), :])  # 10s
-
-                else:
-                    input_data_dict['values'] = np.array(signal1[start_inx: stop_inx]).reshape((1, stop_inx - start_inx))
-
-                band = [2, 15]  # [int(band_tmp[0]), int(band_tmp[1])]
-                window_length = 1  # int(additional_input["windowLength"])
-                # aEEG_labels, aEEG_values = aEEG_com1(input_data_dict, band, window_length)
-                abp_labels, abp_values, rbp_values = abp_rbp_com1(input_data_dict, 'abp')
-                channel_labels, utp, ltp = aEEG_com1(input_data_dict, band, window_length)  # utp, ltp
-                utp_t.extend(utp)
-                ltp_t.extend(ltp)
-                start_seconds = stop_seconds
-                stop_seconds = stop_seconds + epoch_length  # 10
-
-                # aEEG波形
-            plot_aEEG(utp_t, ltp_t, '/disk1/workspace/py39_tf270/SleepEpilepsy1/resource/test/sleepstage/JJY/')
 
 
 

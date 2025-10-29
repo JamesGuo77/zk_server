@@ -30,5 +30,4 @@ urlpatterns = [
     path('qteeg_history2', views11.qteeg_history),
     path('qteeg_history3', views12.qteeg_history),
     path('qteeg_history4', views11s.qteeg_history),
-    # path('qeeg_monitor', views.qeeg_monitor)
 ]

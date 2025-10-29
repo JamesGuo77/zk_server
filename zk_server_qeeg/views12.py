@@ -2650,9 +2650,11 @@ def qteeg_history(request):
                 threads = []
                 for ttype in trend_chns_dict.keys():  # "ABP", "RBP",
                     if ttype == trend_name[0]:  # ["aEEG", "ABP", "RBP", "RAV", "SE", "CSA", "Envelope", "TP", "ADR", "ABR"]
+                        band = [2, 15]
+                        window_length = 1
                         aEEG_t = threading.Thread(target=thread_workers, args=(aEEG_com_t, (
-                        start_seconds, stop_seconds, json_data['specialElectrodes'], raw, ttype, trend_chns_dict["aEEG"],
-                        sample_frequency, 'history', json_data["taskID"]), result_queue))
+                        start_seconds, stop_seconds, json_data['specialElectrodes'], raw, trend_chns_dict["aEEG"],
+                        sample_frequency, band, window_length, 'history', json_data["taskID"]), result_queue))
                         # 启动线程
                         threads.append(aEEG_t)
                         aEEG_t.start()
@@ -2849,7 +2851,7 @@ def sig_uv_read(start_seconds, stop_seconds, special_electrodes, raw, channels, 
 
     return sigbufs_res
 
-def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, ttype, channels, sample_frequency, history_monitor, task_id):
+def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, channels, sample_frequency, band, window_length, history_monitor, task_id):
     # start_inx = int(sample_frequency * start_seconds)  # 可以为float类型
     # stop_inx = int(sample_frequency * stop_seconds)
     # t_idx = raw.time_as_index([start_inx, stop_inx], use_rounding=True)
@@ -2862,13 +2864,12 @@ def aEEG_com_t(start_seconds, stop_seconds, special_electrodes, raw, ttype, chan
     # sigbufs_res = read_bdf(sigbufs, signal_labels, channels, node_dict)  # mne读取信号单位为uV
     sigbufs_res = sig_uv_read(start_seconds, stop_seconds, special_electrodes, raw, channels, sample_frequency, history_monitor)
     # print("读入bdf并合并基础电极幅值完成， %.8s s" % (time.time() - start_time1))
-    band = [2, 15]
-    window_length = 1
+
     # aEEG_compute_h
     aEEG_labels, aEEG_values = aEEG_compute_h3(sigbufs_res, channels, sample_frequency, band, window_length)  # utp, ltp
     # print("aEEG计算完成， %.8s s" % (time.time() - start_time1))
 
-    ana_type = ttype
+    ana_type = 'aEEG'
     tk = str(aEEG_labels)
     tk = tk.replace("\'", "\"")
     result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {aEEG_values}" + " }"
