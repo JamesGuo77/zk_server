@@ -341,6 +341,50 @@ def aeeg_monitor(request):
         error_message["message"] = "The request method is incorrect"
         return HttpResponse(json.dumps(error_message))
 
+def qeeg_monitor(request):
+    if request.method == 'POST':
+        if request.content_type == 'application/json':
+            jsonStr = request.body.decode('utf-8')
+            input_data_dict = json.loads(jsonStr)
+            additional_input = json.loads(input_data_dict["additionalInput"])
+            band_tmp = additional_input["band"].split(":")
+            band = [int(band_tmp[0]), int(band_tmp[1])]
+            window_length = int(additional_input["windowLength"])
+
+            channles = len([channel for channel in input_data_dict['labels']])  # trendChannels if 'EEG' in channel
+            data_values = np.array(input_data_dict['values'][:channles])
+
+            channel_labels = input_data_dict['labels'][:channles]
+            sample_frequency = int(input_data_dict['samples'][0])
+
+            # channel_labels, channel_values = aEEG_compute_h1(input_data_dict, band, window_length)  # utp, ltp
+            sigbufs1 = get_hot_products(input_data_dict["taskID"], data_values, channel_labels, sample_frequency)
+            sigbufs_res = sigbufs1
+            # print("读入bdf并合并基础电极幅值完成， %.8s s" % (time.time() - start_time1))
+
+            # aEEG_compute_h
+            channel_labels, channel_values = aEEG_compute_h3(sigbufs_res, channel_labels, sample_frequency, band, window_length)
+            # aEEG_t = aEEG_his(sigbufs1, [], channel_labels, channel_labels,
+            #     sample_frequency, band, window_length, 'monitor', input_data_dict["taskID"])
+
+            task_id = input_data_dict["taskID"]
+            ana_type = "aEEG"
+            # channel_labels = str(channel_labels).replace("\'", '\"')
+
+            tk = str(channel_labels)
+            tk = tk.replace("\'", "\"")
+
+            result = "{ " + f"\"taskID\": \"{task_id}\", \"type\": \"{ana_type}\", \"labels\": {tk}, \"values\": {channel_values}" + " }"
+            return HttpResponse(result)
+            # return HttpResponse(json.dumps(success_message))
+        else:
+            error_message["message"] = "The content type is incorrect. Please input it application/json"
+            return HttpResponse(json.dumps(error_message))
+    else:
+        error_message["message"] = "The request method is incorrect"
+        return HttpResponse(json.dumps(error_message))
+
+
 def qteeg_monitor(request):
     if request.method == 'POST':
         if request.content_type == 'application/json':
@@ -422,7 +466,7 @@ def qteeg_monitor(request):
             #     train_data = signal_split(start_seconds, stop_seconds, sigbufs, epoch_length, sample_frequency)
 
             threads = []  ## 需考虑history和monitor同时调用情况
-            total_chns = raw.ch_names
+            # total_chns = channel_labels
             for ttype in trend_chns_dict.keys():  # "ABP", "RBP",
                 if ttype == trend_name[0]:  # ["aEEG", "ABP", "RBP", "RAV", "SE", "CSA", "Envelope", "TP", "ADR", "ABR"]
                     sigbufs1 = get_hot_products(json_data["taskID"], data_values, trend_chns_dict["aEEG"], sample_frequency)
@@ -530,10 +574,19 @@ def qteeg_monitor(request):
                 # aEEG and Envelope unit is uV, return type+label, others return type+signal
                 if (tchns["type"] == trend_name[0]) or (tchns["type"] == trend_name[6]):
                     type_chn = tchns["type"] + tchns["label"]
+                    print("type_values len: ", len(type_values[type_chn]))
+                    if len(type_values[type_chn]) < 2:
+                        channel_values.append([])
+
+                    else:
+                        channel_values.append(type_values[type_chn].tolist()[-2])
+                    print(type(type_values[type_chn]), len(type_values[type_chn]))
+                    print(type_values[type_chn].tolist())
                 else:
                     type_chn = tchns["type"] + tchns["signal"]
+                    channel_values.append(type_values[type_chn].tolist())
 
-                channel_values.append(type_values[type_chn].tolist())
+                # channel_values.append(type_values[type_chn].tolist())
                 # print(type_chn, type_values[type_chn].shape, len(type_values[type_chn].shape))
 
             tk = str(trend_channels)
@@ -2947,6 +3000,44 @@ def multi_chns_se(start_seconds, stop_seconds, raw, ttype, channels, fs, task_id
 #         error_message["message"] = "The request method is incorrect"
 #         return HttpResponse(json.dumps(error_message))
 
+# 部分存在问题
+# def get_hot_products(cache_key, sigbuf, chns, sample_frequency):
+#     # 定义唯一缓存键
+#     # cache_key = "hot_products"
+#     # if len(sigbuf.shape) < 2:
+#     #     sigbuf = sigbuf.reshape((1, len(sigbuf)))
+#     # else:
+#     #     sigbuf = sigbuf
+#     print("sigbuf shape: ", sigbuf.shape)
+#     # 尝试从缓存获取
+#     products = cache.get(cache_key)
+#     if products is None:
+#         # 缓存未命中：查询数据库（耗时操作）
+#         sigbuf1 = sigbuf
+#         products = sigbuf1.tobytes()
+#
+#     else:
+#         # byte解析为numpy.array
+#         cache_data = np.frombuffer(products, dtype=sigbuf.dtype)
+#         sec_num = int(len(cache_data) / (len(chns) * sample_frequency))
+#
+#         # 分解为[sec, chns, fs]
+#         sigbuf1 = cache_data.reshape((sec_num, len(chns), sample_frequency))
+#
+#         sigbuf1 = sigbuf1.swapaxes(0, 1)
+#         # 变换为[chns, sec*fs]
+#         sigbuf1 = sigbuf1.reshape((sigbuf1.shape[0], sigbuf1.shape[1] * sigbuf1.shape[2]))
+#         # 加入当前sigbuf 以列存放
+#         sigbuf1 = np.hstack([sigbuf1, sigbuf])
+#         if sec_num == 10:
+#             sigbuf1 = sigbuf1[:, sample_frequency:]
+#         products = sigbuf1.tobytes()  # sigbuf.tobytes()
+#
+#     # 存入缓存，设置超时时间（30分钟，根据更新频率调整）
+#     cache.set(cache_key, products, 60 * 3)  # 20s , 60 * 60 * 10
+#
+#     return sigbuf1
+
 def get_hot_products(cache_key, sigbuf, chns, sample_frequency):
     # 定义唯一缓存键
     # cache_key = "hot_products"
@@ -2956,33 +3047,35 @@ def get_hot_products(cache_key, sigbuf, chns, sample_frequency):
     #     sigbuf = sigbuf
     print("sigbuf shape: ", sigbuf.shape)
     # 尝试从缓存获取
-    products = cache.get(cache_key)
-    if products is None:
+    products = cache.get(cache_key, [])
+    print("1st: ", type(products), len(products))
+    if len(products) < 1:
         # 缓存未命中：查询数据库（耗时操作）
-        sigbuf1 = sigbuf
-        products = sigbuf1.tobytes()
+        # sigbuf1 = sigbuf
+        products = sigbuf  # .tobytes()
 
     else:
         # byte解析为numpy.array
-        cache_data = np.frombuffer(products, dtype=sigbuf.dtype)
-        sec_num = int(len(cache_data) / (len(chns) * sample_frequency))
-
-        # 分解为[sec, chns, fs]
-        sigbuf1 = cache_data.reshape((sec_num, len(chns), sample_frequency))
-
-        sigbuf1 = sigbuf1.swapaxes(0, 1)
-        # 变换为[chns, sec*fs]
-        sigbuf1 = sigbuf1.reshape((sigbuf1.shape[0], sigbuf1.shape[1] * sigbuf1.shape[2]))
+        # cache_data = np.frombuffer(products, dtype=sigbuf.dtype)
+        # sec_num = int(len(cache_data) / (len(chns) * sample_frequency))
+        #
+        # # 分解为[sec, chns, fs]
+        # sigbuf1 = cache_data.reshape((sec_num, len(chns), sample_frequency))
+        #
+        # sigbuf1 = sigbuf1.swapaxes(0, 1)
+        # # 变换为[chns, sec*fs]
+        # sigbuf1 = sigbuf1.reshape((sigbuf1.shape[0], sigbuf1.shape[1] * sigbuf1.shape[2]))
         # 加入当前sigbuf 以列存放
-        sigbuf1 = np.hstack([sigbuf1, sigbuf])
-        if sec_num == 10:
-            sigbuf1 = sigbuf1[:, sample_frequency:]
-        products = sigbuf1.tobytes()  # sigbuf.tobytes()
+        products = np.hstack([products, sigbuf])
+        print("2nd: ", type(products), products.shape)
+        if products.shape[1] == 11 * sample_frequency:
+            products = products[:, sample_frequency:]
+        # products = sigbuf1.tobytes()  # sigbuf.tobytes()
 
     # 存入缓存，设置超时时间（30分钟，根据更新频率调整）
     cache.set(cache_key, products, 60 * 3)  # 20s , 60 * 60 * 10
 
-    return sigbuf1
+    return products
 
 def qteeg_history(request):
     if request.method == 'POST':
@@ -3076,7 +3169,6 @@ def qteeg_history(request):
                         window_length = 1
 
                         # sigbufs1 = get_hot_products(json_data["taskID"], sigbufs, trend_chns_dict["aEEG"], sample_frequency)
-                        # print("sigbufs shape: ", sigbufs.shape)
                         aEEG_t = threading.Thread(target=thread_workers, args=(aEEG_his, (
                         sigbufs, json_data['specialElectrodes'], total_chns, trend_chns_dict["aEEG"],
                         sample_frequency, band, window_length, 'history', json_data["taskID"]), result_queue))
@@ -3221,18 +3313,15 @@ def qteeg_history(request):
                         ### Start
                         # print("type_values len: ", len(type_values[type_chn]))
                         # if len(type_values[type_chn]) < 2:
-                        #     print([])
                         #     channel_values.append([])
                         #
                         # else:
-                        #     print(type_values[type_chn].tolist()[-2])
                         #     channel_values.append(type_values[type_chn].tolist()[-2])
                         # print(type(type_values[type_chn]), len(type_values[type_chn]))
                         # print(type_values[type_chn].tolist())
                         ### End
                     else:
                         type_chn = tchns["type"] + tchns["signal"]
-
                         # channel_values.append(type_values[type_chn].tolist())
                     channel_values.append(type_values[type_chn].tolist())
                     # print(type_chn, type_values[type_chn].shape, len(type_values[type_chn].shape))
